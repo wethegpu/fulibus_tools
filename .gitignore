@@ -8,5 +8,8 @@
 # Logs
 *.log
 
+# Node.js development dependencies
+node_modules/
+
 # Claude
 .claude/

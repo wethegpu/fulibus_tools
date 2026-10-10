@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         福利吧工具箱
 // @namespace    http://tampermonkey.net/
-// @version      0.8
+// @version      0.10
 // @description  适配最新版百家姓，并且增加一键复制功能。高亮好孩子看不见
 // @description:zh-cn 适配最新版百家姓，并且增加一键复制功能。高亮好孩子看不见
 // @author       Wee
@@ -24,8 +24,8 @@
 (function () {
     'use strict';
 
-    // 字母数字部分两套编码完全一致，仅特殊符号映射不同
-    const mapBase = {
+    // https://www.bjxah.com/guide.html#guide-map：75 个标准字符及旧版卜别名。
+    const surnameMap = {
         "赵":"0","钱":"1","孙":"2","李":"3","周":"4","吴":"5","郑":"6","王":"7","冯":"8","陈":"9",
         "褚":"a","卫":"b","蒋":"c","沈":"d","韩":"e","杨":"f","朱":"g","秦":"h","尤":"i","许":"j",
         "何":"k","吕":"l","施":"m","张":"n","孔":"o","曹":"p","严":"q","华":"r","金":"s","魏":"t",
@@ -33,77 +33,49 @@
         "福":"A","水":"B","窦":"C","章":"D","云":"E","苏":"F","潘":"G","葛":"H","奚":"I","范":"J",
         "彭":"K","郎":"L","鲁":"M","韦":"N","昌":"O","马":"P","苗":"Q","凤":"R","花":"S","方":"T",
         "俞":"U","任":"V","袁":"W","柳":"X","唐":"Y","罗":"Z",
-    };
-
-    // bjxah.com 官方编码表：薛=: 尹=- 贝=% 钟== 顾=. 赖=空格
-    const mapBjxah = {
-        ...mapBase,
-        "薛":":","姚":"/","孟":"?","江":"&","钟":"=","顾":".","尹":"-","余":"_","贝":"%","赖":" ",
-    };
-
-    // 福利吧论坛/sleazyfork-381494 编码表：薛=. 伍=- 尹=% 贝== 钟=* 顾=# 高=: 田=| 米=+
-    const mapFuliba = {
-        ...mapBase,
         "薛":".","伍":"-","余":"_","米":"+","贝":"=","姚":"/","孟":"?","顾":"#","尹":"%",
-        "江":"&","钟":"*","高":":","田":"|",
+        "江":"&","钟":"*","竺":":","赖":"|","卜":"|",
     };
 
-    const allSurnameChars = new Set([...Object.keys(mapBjxah), ...Object.keys(mapFuliba)]);
-
-    const PROTOCOL_PREFIX_RE = /^(magnet:|https?:|thunder:|ftp:|ed2k:)/i;
     const MAGNET_HEADER = 'magnet:?xt=urn:btih:';
-    const MAGNET_PATTERN = /^[0-9a-fA-F]{40,}/;
+    const MAGNET_HASH_PATTERN = /^[0-9a-fA-F]{40}(?:&[a-zA-Z0-9_.~-]+=[^\s&]*)*$/;
+    const MAGNET_LINK_PATTERN = /^magnet:\?xt=urn:btih:[0-9a-fA-F]{40}(?:&[a-zA-Z0-9_.~-]+=[^\s&]*)*$/i;
+    const ED2K_LINK_PATTERN = /^ed2k:\/\/\|file\|[^|]+\|\d+\|[0-9a-fA-F]{32}\|\/$/i;
 
-    function isSurnameCode(text) {
-        if (!text || text.length < 8) return false;
-        let surnameCount = 0;
-        let nonWhitespaceCount = 0;
-        for (const ch of text) {
-            if (/\s/.test(ch)) continue;
-            nonWhitespaceCount++;
-            if (allSurnameChars.has(ch)) surnameCount++;
-        }
-        if (nonWhitespaceCount === 0) return false;
-        return surnameCount / nonWhitespaceCount >= 0.95;
+    function applyMagnetPrefix(decoded) {
+        return MAGNET_HASH_PATTERN.test(decoded) ? MAGNET_HEADER + decoded : decoded;
     }
 
-    function decodeWith(text, map) {
+    function decodeSurnameText(text) {
         let result = '';
         for (const ch of text) {
             if (/\s/.test(ch)) continue;
-            const decoded = map[ch];
-            result += decoded !== undefined ? decoded : '[' + ch + ']';
+            if (!Object.prototype.hasOwnProperty.call(surnameMap, ch)) return null;
+            result += surnameMap[ch];
         }
-        return result;
+        // 保留 %XX 转义，避免提前解码改变 URL 参数和路径的含义。
+        return applyMagnetPrefix(result);
     }
 
-    function scoreDecoded(decoded) {
-        let score = 0;
-        if (/^[0-9a-fA-F]{40}/.test(decoded)) score += 100;
-        if (PROTOCOL_PREFIX_RE.test(decoded)) score += 50;
-        if (/:\/\//.test(decoded)) score += 30;
-        if (/&\w+=/.test(decoded)) score += 20;
-        const unknownCount = (decoded.match(/\[.\]/g) || []).length;
-        score -= unknownCount * 10;
-        return score;
-    }
-
-    function applyMagnetPrefix(decoded) {
-        if (PROTOCOL_PREFIX_RE.test(decoded)) return decoded;
-        if (MAGNET_PATTERN.test(decoded)) return MAGNET_HEADER + decoded;
-        return decoded;
-    }
-
-    // 先尝试 bjxah 表，如结果置信度高（无未识别字符且得分 >=50）则跳过 fuliba 表，省一次全量遍历
-    function decodeSurnameText(text) {
-        const decodedA = decodeWith(text, mapBjxah);
-        const scoreA = scoreDecoded(decodedA);
-        if (scoreA >= 50 && !decodedA.includes('[')) {
-            return applyMagnetPrefix(decodedA);
+    function isDecodedLink(text) {
+        if (MAGNET_LINK_PATTERN.test(text) || ED2K_LINK_PATTERN.test(text)) return true;
+        if (/^thunder:\/\/[a-zA-Z0-9+/]+={0,2}$/i.test(text)) return true;
+        if (!/^(?:https?:\/\/|ftp:\/\/|www\.)/i.test(text)) return false;
+        try {
+            const url = new URL(/^www\./i.test(text) ? 'https://' + text : text);
+            return Boolean(url.hostname);
+        } catch {
+            return false;
         }
-        const decodedB = decodeWith(text, mapFuliba);
-        const scoreB = scoreDecoded(decodedB);
-        return applyMagnetPrefix(scoreB > scoreA ? decodedB : decodedA);
+    }
+
+    function decodeCommentLine(line) {
+        const labelled = line.match(/^([^:：]+[:：]\s*)(.*)$/);
+        const prefix = labelled ? labelled[1] : '';
+        const candidate = labelled ? labelled[2] : line;
+        const decoded = decodeSurnameText(candidate);
+        if (!decoded || !isDecodedLink(decoded)) return null;
+        return { display: prefix + decoded, link: decoded };
     }
 
     function createCopyButton(text) {
@@ -126,16 +98,14 @@
         return btn;
     }
 
-    function replaceParagraphContent(pElement, decodedLines, copyText) {
+    function replaceParagraphContent(pElement, decodedLines) {
         pElement.dataset.bjxahDecoded = '1';
         while (pElement.firstChild) pElement.removeChild(pElement.firstChild);
         decodedLines.forEach((line, idx) => {
             if (idx > 0) pElement.appendChild(document.createElement('br'));
-            pElement.appendChild(document.createTextNode(line));
+            pElement.appendChild(document.createTextNode(line.display));
+            if (line.link) pElement.appendChild(createCopyButton(line.link));
         });
-        const textToCopy = (copyText !== undefined ? copyText : decodedLines.join('\n'))
-            .replace(/\[[^\]]+\]/g, '').trim();
-        pElement.appendChild(createCopyButton(textToCopy));
     }
 
     function processCommentParagraph(pElement) {
@@ -143,28 +113,11 @@
 
         const text = (pElement.innerText ?? pElement.textContent).trim();
 
-        // 优先处理多行内容（含 <br> 分割），避免整段文本通过 isSurnameCode 检测后将非暗号行一并解码
-        if (text.includes('\n')) {
-            let hasDecoded = false;
-            const decodedOnlyLines = [];
-            const decodedLines = text.split('\n').map((line) => {
-                const trimmed = line.trim();
-                if (isSurnameCode(trimmed)) {
-                    hasDecoded = true;
-                    const decoded = decodeSurnameText(trimmed);
-                    decodedOnlyLines.push(decoded);
-                    return decoded;
-                }
-                return line;
-            });
-            if (!hasDecoded) return;
-            replaceParagraphContent(pElement, decodedLines, decodedOnlyLines.join('\n'));
-            return;
-        }
-
-        if (isSurnameCode(text)) {
-            replaceParagraphContent(pElement, [decodeSurnameText(text)]);
-        }
+        const decodedLines = text.split(/\r?\n/).map((line) => {
+            return decodeCommentLine(line) || { display: line };
+        });
+        if (!decodedLines.some((line) => line.link)) return;
+        replaceParagraphContent(pElement, decodedLines);
     }
 
     function processAllComments() {
